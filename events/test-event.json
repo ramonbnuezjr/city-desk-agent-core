@@ -1,0 +1,13 @@
+{
+  "httpMethod": "POST",
+  "path": "/query",
+  "headers": {
+    "Content-Type": "application/json",
+    "x-api-key": "test-api-key-12345"
+  },
+  "body": "{\"q\": \"How do I apply for a SNAP card?\", \"top_k\": 3}",
+  "requestContext": {
+    "requestId": "test-request-id",
+    "stage": "dev"
+  }
+}

@@ -1,0 +1,298 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: City Desk - Serverless AWS RAG Agent for NYC Resident Questions
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        KNOWLEDGE_BASE_ID: !Ref BedrockKnowledgeBase
+        BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+        LOG_LEVEL: INFO
+
+Parameters:
+  ApiKey:
+    Type: String
+    Description: API Key for authentication
+    NoEcho: true
+  
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+Resources:
+  # S3 Bucket for raw documents
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub city-desk-documents-${Environment}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
+  # S3 Bucket for vector embeddings
+  VectorBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub city-desk-vectors-${Environment}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  # Bedrock Knowledge Base
+  BedrockKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub city-desk-kb-${Environment}
+      Description: Knowledge base for NYC service information
+      RoleArn: !GetAtt BedrockKnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1
+          VectorStoreConfiguration:
+            VectorStoreType: S3
+            S3Configuration:
+              S3Uri: !Sub s3://${VectorBucket}
+              VectorStoreType: S3
+
+  # IAM Role for Bedrock Knowledge Base
+  BedrockKnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub city-desk-kb-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub ${VectorBucket}/*
+                  - !Sub ${VectorBucket}
+
+  # Lambda Function for RAG Agent
+  RAGAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub city-desk-rag-agent-${Environment}
+      CodeUri: src/
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: !Ref BedrockKnowledgeBase
+          BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+          LOG_LEVEL: INFO
+      Policies:
+        - BedrockInvokeModelPolicy:
+            ModelId: anthropic.claude-3-sonnet-20240229-v1:0
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucket
+        - S3ReadPolicy:
+            BucketName: !Ref VectorBucket
+        - BedrockKnowledgeBasePolicy:
+            KnowledgeBaseId: !Ref BedrockKnowledgeBase
+
+  # API Gateway HTTP API
+  CityDeskApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Name: !Sub city-desk-api-${Environment}
+      Auth:
+        DefaultAuthorizer: ApiKeyAuthorizer
+        Authorizers:
+          ApiKeyAuthorizer:
+            FunctionArn: !GetAtt ApiKeyAuthorizerFunction.Arn
+            Identity:
+              Headers:
+                - x-api-key
+      Cors:
+        AllowMethods: "'POST, OPTIONS'"
+        AllowHeaders: "'Content-Type, x-api-key'"
+        AllowOrigin: "'*'"
+      Routes:
+        QueryRoute:
+          Path: /query
+          Method: POST
+          Target: !Sub integrations://${RAGAgentFunction}
+
+  # Lambda Function for API Key Authorization
+  ApiKeyAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub city-desk-api-authorizer-${Environment}
+      CodeUri: src/
+      Handler: authorizer.lambda_handler
+      Runtime: python3.12
+      Environment:
+        Variables:
+          API_KEY: !Ref ApiKey
+          LOG_LEVEL: INFO
+
+  # CloudWatch Log Group
+  RAGAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/city-desk-rag-agent-${Environment}
+      RetentionInDays: 14
+
+  # AWS Budgets
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: 25
+          Unit: USD
+        BudgetName: !Sub city-desk-monthly-budget-${Environment}
+        CostFilters:
+          TagKeyValue: "Environment$${Environment}"
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref BudgetAlertEmail
+            - SubscriptionType: EMAIL
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref BudgetAlertEmail
+            - SubscriptionType: EMAIL
+
+  # SNS Topic for Budget Alerts
+  BudgetAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub city-desk-budget-alerts-${Environment}
+      DisplayName: !Sub City Desk Budget Alerts - ${Environment}
+
+  # CloudTrail
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: !Sub city-desk-trail-${Environment}
+      S3BucketName: !Ref CloudTrailBucket
+      IsLogging: true
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailRole.Arn
+
+  # S3 Bucket for CloudTrail logs
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub city-desk-cloudtrail-${Environment}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # CloudWatch Log Group for CloudTrail
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/cloudtrail/city-desk-${Environment}
+      RetentionInDays: 14
+
+  # IAM Role for CloudTrail
+  CloudTrailRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub city-desk-cloudtrail-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+Parameters:
+  BudgetAlertEmail:
+    Type: String
+    Description: Email address for budget alerts
+    Default: admin@example.com
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${CityDeskApi}.execute-api.${AWS::Region}.amazonaws.com
+    Export:
+      Name: !Sub city-desk-api-endpoint-${Environment}
+
+  DocumentsBucketName:
+    Description: S3 bucket for raw documents
+    Value: !Ref DocumentsBucket
+    Export:
+      Name: !Sub city-desk-documents-bucket-${Environment}
+
+  VectorBucketName:
+    Description: S3 bucket for vector embeddings
+    Value: !Ref VectorBucket
+    Export:
+      Name: !Sub city-desk-vectors-bucket-${Environment}
+
+  KnowledgeBaseId:
+    Description: Bedrock Knowledge Base ID
+    Value: !Ref BedrockKnowledgeBase
+    Export:
+      Name: !Sub city-desk-kb-id-${Environment}
+
