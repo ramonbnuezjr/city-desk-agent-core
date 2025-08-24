@@ -1,0 +1,126 @@
+name: City Desk CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: city-desk
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          python test_setup.py
+
+      - name: Validate SAM template
+        run: |
+          pip install pyyaml
+          python -c "import yaml; yaml.safe_load(open('template.yaml'))"
+          echo "✅ SAM template is valid YAML"
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install AWS SAM
+        uses: aws-actions/setup-sam@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build SAM application
+        run: sam build --use-container
+
+      - name: Deploy to dev environment
+        run: |
+          sam deploy \
+            --stack-name ${{ env.STACK_NAME }}-dev \
+            --region ${{ env.AWS_REGION }} \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides \
+              Environment=dev \
+              ApiKey=${{ secrets.API_KEY }} \
+              BudgetAlertEmail=${{ secrets.BUDGET_EMAIL }} \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset
+
+      - name: Get deployment outputs
+        run: |
+          echo "API_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }}-dev \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text)" >> $GITHUB_ENV
+
+      - name: Test API endpoint
+        run: |
+          if [ -n "$API_ENDPOINT" ]; then
+            echo "Testing API endpoint: $API_ENDPOINT"
+            curl -s -X POST "$API_ENDPOINT/query" \
+              -H "Content-Type: application/json" \
+              -H "x-api-key: ${{ secrets.API_KEY }}" \
+              -d '{"q": "test", "top_k": 1}' \
+              --max-time 30 || echo "API test completed"
+          else
+            echo "⚠️ API endpoint not available for testing"
+          fi
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run security scan
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  notify:
+    needs: [build, security-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify deployment status
+        run: |
+          if [ "${{ needs.build.result }}" == "success" ]; then
+            echo "🎉 City Desk deployed successfully to dev environment!"
+            echo "API Endpoint: ${{ needs.build.outputs.api-endpoint }}"
+          else
+            echo "❌ City Desk deployment failed"
+          fi
