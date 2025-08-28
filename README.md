@@ -21,6 +21,7 @@ Client → API Gateway (HTTP API) → Lambda (Python) → Bedrock Knowledge Base
 - **API Gateway HTTP API**: Low-cost, stateless API endpoint
 - **Lambda Functions**: Python 3.12 runtime for RAG processing and API key auth
 - **Bedrock Knowledge Base**: Managed RAG with S3 Vectors for embeddings
+- **Titan Text Express**: Fast, cost-effective text generation model
 - **S3 Storage**: Raw documents + vector indexes with lifecycle policies
 - **CloudWatch**: Logging, metrics, and monitoring
 - **AWS Budgets**: Cost alerts at 50%, 80%, and 100% thresholds

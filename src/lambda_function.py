@@ -181,23 +181,24 @@ Instructions:
 Answer:"""
 
     try:
-        # Invoke Bedrock model
+        # Invoke Bedrock model (Titan Text Express)
         response = bedrock_runtime.invoke_model(
             modelId=BEDROCK_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
             body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 1000,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
+                "inputText": prompt,
+                "textGenerationConfig": {
+                    "temperature": 0.7,
+                    "maxTokenCount": 1000,
+                    "topP": 0.9,
+                    "stopSequences": []
+                }
             })
         )
         
         response_body = json.loads(response['body'].read())
-        answer = response_body['content'][0]['text'].strip()
+        answer = response_body['results'][0]['outputText'].strip()
         
         # Clean up answer
         if answer.startswith("Answer:"):

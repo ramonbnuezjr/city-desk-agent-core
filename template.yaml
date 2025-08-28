@@ -11,7 +11,7 @@ Globals:
     Environment:
       Variables:
         KNOWLEDGE_BASE_ID: !Ref BedrockKnowledgeBase
-        BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+        BEDROCK_MODEL_ID: amazon.titan-text-express-v1
         LOG_LEVEL: INFO
 
 Parameters:
@@ -119,11 +119,11 @@ Resources:
       Environment:
         Variables:
           KNOWLEDGE_BASE_ID: !Ref BedrockKnowledgeBase
-          BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+          BEDROCK_MODEL_ID: amazon.titan-text-express-v1
           LOG_LEVEL: INFO
       Policies:
         - BedrockInvokeModelPolicy:
-            ModelId: anthropic.claude-3-sonnet-20240229-v1:0
+            ModelId: amazon.titan-text-express-v1
         - S3ReadPolicy:
             BucketName: !Ref DocumentsBucket
         - S3ReadPolicy:
